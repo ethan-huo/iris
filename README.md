@@ -20,6 +20,12 @@ cd iris
 go build -o bin/iris ./
 ```
 
+### Claude Code Skill
+
+```bash
+bunx skills add ethan-huo/iris
+```
+
 ## Setup
 
 ```bash
