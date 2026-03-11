@@ -5,8 +5,8 @@ import (
 	"os"
 
 	"github.com/alecthomas/kong"
-	"github.com/anthropics/iris/cmd"
-	"github.com/anthropics/iris/internal/config"
+	"github.com/ethan-huo/iris/cmd"
+	"github.com/ethan-huo/iris/internal/config"
 )
 
 var cli struct {

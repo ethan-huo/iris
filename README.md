@@ -26,7 +26,7 @@ go build -o bin/iris ./
 iris auth login
 ```
 
-Paste your Paddle API key (get one at [aistudio.baidu.com](https://aistudio.baidu.com/)). Key is stored in `~/.config/iris/config.yaml`.
+Paste your Paddle API key (get one at [aistudio.baidu.com](https://aistudio.baidu.com/)). Key is stored in your OS config directory, typically `~/.config/iris/config.yaml` on Linux or `~/Library/Application Support/iris/config.yaml` on macOS.
 
 ## Usage
 
@@ -62,6 +62,8 @@ output/
 ├── layout_det_res_000.jpg   # Layout detection visualization
 └── layout_det_res_001.jpg
 ```
+
+When scanning multiple inputs, `iris` writes each source into its own subdirectory under the chosen output directory.
 
 ## License
 

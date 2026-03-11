@@ -2,6 +2,7 @@ package ocr
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -12,14 +13,14 @@ import (
 	"strings"
 )
 
-const SyncAPIURL = "https://451cr7t8d1z2yck2.aistudio-app.com/layout-parsing"
+var SyncAPIURL = "https://451cr7t8d1z2yck2.aistudio-app.com/layout-parsing"
 
 type SyncRequest struct {
-	File                     string `json:"file"`
-	FileType                 int    `json:"fileType"`
+	File                      string `json:"file"`
+	FileType                  int    `json:"fileType"`
 	UseDocOrientationClassify bool   `json:"useDocOrientationClassify"`
-	UseDocUnwarping          bool   `json:"useDocUnwarping"`
-	UseChartRecognition      bool   `json:"useChartRecognition"`
+	UseDocUnwarping           bool   `json:"useDocUnwarping"`
+	UseChartRecognition       bool   `json:"useChartRecognition"`
 }
 
 type SyncResponse struct {
@@ -31,8 +32,8 @@ type LayoutResult struct {
 }
 
 type LayoutParsingResult struct {
-	Markdown     MarkdownResult        `json:"markdown"`
-	OutputImages map[string]string     `json:"outputImages"`
+	Markdown     MarkdownResult    `json:"markdown"`
+	OutputImages map[string]string `json:"outputImages"`
 }
 
 type MarkdownResult struct {
@@ -61,14 +62,17 @@ func SyncScan(apiKey string, filePath string) (*LayoutResult, error) {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", SyncAPIURL, bytes.NewReader(body))
+	ctx, cancel := context.WithTimeout(context.Background(), syncRequestTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, SyncAPIURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "token "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
 	}

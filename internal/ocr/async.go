@@ -1,6 +1,7 @@
 package ocr
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,10 +13,15 @@ import (
 	"time"
 )
 
-const (
-	AsyncAPIURL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
-	Model       = "PaddleOCR-VL-1.5"
+var (
+	AsyncAPIURL        = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+	httpClient         = &http.Client{Timeout: 5 * time.Minute}
+	asyncPollInterval  = 3 * time.Second
+	asyncJobTimeout    = 20 * time.Minute
+	syncRequestTimeout = 5 * time.Minute
 )
+
+const Model = "PaddleOCR-VL-1.5"
 
 type JobResponse struct {
 	Data struct {
@@ -44,7 +50,10 @@ type ProgressFunc func(state string, extracted, total int)
 // AsyncScan submits a file to the async job API, polls until complete,
 // and returns the parsed results. Use for PDFs and batch processing.
 func AsyncScan(apiKey string, filePath string, onProgress ProgressFunc) ([]LayoutResult, error) {
-	jobID, err := submitJob(apiKey, filePath)
+	ctx, cancel := context.WithTimeout(context.Background(), asyncJobTimeout)
+	defer cancel()
+
+	jobID, err := submitJob(ctx, apiKey, filePath)
 	if err != nil {
 		return nil, fmt.Errorf("submit job: %w", err)
 	}
@@ -53,12 +62,12 @@ func AsyncScan(apiKey string, filePath string, onProgress ProgressFunc) ([]Layou
 		onProgress("submitted", 0, 0)
 	}
 
-	jsonlURL, err := pollJob(apiKey, jobID, onProgress)
+	jsonlURL, err := pollJob(ctx, apiKey, jobID, onProgress)
 	if err != nil {
 		return nil, fmt.Errorf("poll job: %w", err)
 	}
 
-	results, err := fetchResults(jsonlURL)
+	results, err := fetchResults(ctx, jsonlURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch results: %w", err)
 	}
@@ -66,14 +75,14 @@ func AsyncScan(apiKey string, filePath string, onProgress ProgressFunc) ([]Layou
 	return results, nil
 }
 
-func submitJob(apiKey string, filePath string) (string, error) {
+func submitJob(ctx context.Context, apiKey string, filePath string) (string, error) {
 	if strings.HasPrefix(filePath, "http") {
-		return submitJobURL(apiKey, filePath)
+		return submitJobURL(ctx, apiKey, filePath)
 	}
-	return submitJobFile(apiKey, filePath)
+	return submitJobFile(ctx, apiKey, filePath)
 }
 
-func submitJobURL(apiKey string, fileURL string) (string, error) {
+func submitJobURL(ctx context.Context, apiKey string, fileURL string) (string, error) {
 	payload := map[string]interface{}{
 		"fileUrl": fileURL,
 		"model":   Model,
@@ -89,7 +98,7 @@ func submitJobURL(apiKey string, fileURL string) (string, error) {
 		return "", err
 	}
 
-	req, err := http.NewRequest("POST", AsyncAPIURL, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, AsyncAPIURL, strings.NewReader(string(body)))
 	if err != nil {
 		return "", err
 	}
@@ -99,7 +108,7 @@ func submitJobURL(apiKey string, fileURL string) (string, error) {
 	return doSubmit(req)
 }
 
-func submitJobFile(apiKey string, filePath string) (string, error) {
+func submitJobFile(ctx context.Context, apiKey string, filePath string) (string, error) {
 	if _, err := os.Stat(filePath); err != nil {
 		return "", fmt.Errorf("file not found: %s", filePath)
 	}
@@ -108,17 +117,30 @@ func submitJobFile(apiKey string, filePath string) (string, error) {
 	writer := multipart.NewWriter(pw)
 
 	go func() {
-		defer pw.Close()
-		defer writer.Close()
+		var err error
+		defer func() {
+			if err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+			if closeErr := writer.Close(); closeErr != nil {
+				_ = pw.CloseWithError(closeErr)
+				return
+			}
+			_ = pw.Close()
+		}()
 
-		writer.WriteField("model", Model)
-
+		if err = writer.WriteField("model", Model); err != nil {
+			return
+		}
 		optPayload, _ := json.Marshal(map[string]bool{
 			"useDocOrientationClassify": false,
 			"useDocUnwarping":           false,
 			"useChartRecognition":       false,
 		})
-		writer.WriteField("optionalPayload", string(optPayload))
+		if err = writer.WriteField("optionalPayload", string(optPayload)); err != nil {
+			return
+		}
 
 		part, err := writer.CreateFormFile("file", filepath.Base(filePath))
 		if err != nil {
@@ -129,10 +151,12 @@ func submitJobFile(apiKey string, filePath string) (string, error) {
 			return
 		}
 		defer f.Close()
-		io.Copy(part, f)
+		if _, err = io.Copy(part, f); err != nil {
+			return
+		}
 	}()
 
-	req, err := http.NewRequest("POST", AsyncAPIURL, pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, AsyncAPIURL, pr)
 	if err != nil {
 		return "", err
 	}
@@ -143,7 +167,7 @@ func submitJobFile(apiKey string, filePath string) (string, error) {
 }
 
 func doSubmit(req *http.Request) (string, error) {
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("send request: %w", err)
 	}
@@ -170,15 +194,19 @@ func doSubmit(req *http.Request) (string, error) {
 	return result.Data.JobID, nil
 }
 
-func pollJob(apiKey string, jobID string, onProgress ProgressFunc) (string, error) {
+func pollJob(ctx context.Context, apiKey string, jobID string, onProgress ProgressFunc) (string, error) {
 	for {
-		req, err := http.NewRequest("GET", AsyncAPIURL+"/"+jobID, nil)
+		if err := ctx.Err(); err != nil {
+			return "", fmt.Errorf("wait for job: %w", err)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, AsyncAPIURL+"/"+jobID, nil)
 		if err != nil {
 			return "", err
 		}
 		req.Header.Set("Authorization", "bearer "+apiKey)
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return "", fmt.Errorf("poll request: %w", err)
 		}
@@ -218,18 +246,34 @@ func pollJob(apiKey string, jobID string, onProgress ProgressFunc) (string, erro
 			return status.Data.ResultURL.JsonURL, nil
 		case "failed":
 			return "", fmt.Errorf("job failed: %s", status.Data.ErrorMsg)
+		default:
+			return "", fmt.Errorf("unknown job state: %s", status.Data.State)
 		}
 
-		time.Sleep(3 * time.Second)
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("wait for job: %w", ctx.Err())
+		case <-time.After(asyncPollInterval):
+		}
 	}
 }
 
-func fetchResults(jsonlURL string) ([]LayoutResult, error) {
-	resp, err := http.Get(jsonlURL)
+func fetchResults(ctx context.Context, jsonlURL string) ([]LayoutResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jsonlURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch results: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("fetch results (status %d): %s", resp.StatusCode, string(body))
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

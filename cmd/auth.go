@@ -5,7 +5,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/anthropics/iris/internal/config"
+	"github.com/ethan-huo/iris/internal/config"
 	"golang.org/x/term"
 )
 
@@ -19,8 +19,10 @@ type AuthLoginCmd struct{}
 type AuthStatusCmd struct{}
 
 func (c *AuthLoginCmd) Run(cfg *config.AppConfig) error {
-	fmt.Println("Paddle OCR API authentication\n")
-	fmt.Printf("Get your API key from: https://aistudio.baidu.com/\n\n")
+	fmt.Println("Paddle OCR API authentication")
+	fmt.Println()
+	fmt.Println("Get your API key from: https://aistudio.baidu.com/")
+	fmt.Println()
 
 	fmt.Printf("API Key (input hidden): ")
 	keyBytes, err := term.ReadPassword(int(syscall.Stdin))
@@ -34,18 +36,13 @@ func (c *AuthLoginCmd) Run(cfg *config.AppConfig) error {
 		return fmt.Errorf("API key cannot be empty")
 	}
 
-	newCfg := config.Config{
-		Paddle: config.PaddleConfig{
-			APIKey: apiKey,
-		},
-	}
-
-	if err := config.Save(newCfg); err != nil {
+	cfg.Config.Paddle.APIKey = apiKey
+	if err := cfg.Save(); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
 
 	fmt.Printf("\nSaved to %s\n", cfg.ConfigPath())
-	fmt.Printf("  Key: %s...%s\n", apiKey[:4], apiKey[len(apiKey)-4:])
+	fmt.Printf("  Key: %s\n", config.MaskSecret(apiKey))
 
 	return nil
 }
@@ -57,7 +54,6 @@ func (c *AuthStatusCmd) Run(cfg *config.AppConfig) error {
 		return nil
 	}
 
-	masked := key[:4] + "..." + key[len(key)-4:]
-	fmt.Printf("API Key: %s\n", masked)
+	fmt.Printf("API Key: %s\n", config.MaskSecret(key))
 	return nil
 }

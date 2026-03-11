@@ -4,12 +4,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
-	"github.com/anthropics/iris/internal/config"
-	"github.com/anthropics/iris/internal/ocr"
-	"github.com/anthropics/iris/internal/output"
+	"github.com/ethan-huo/iris/internal/config"
+	"github.com/ethan-huo/iris/internal/ocr"
+	"github.com/ethan-huo/iris/internal/output"
 )
+
+var outputSegmentPattern = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+var syncScan = ocr.SyncScan
+var asyncScan = ocr.AsyncScan
+var saveResults = output.SaveResults
 
 type ScanCmd struct {
 	Files  []string `arg:"" help:"Files to scan (images, PDFs, or URLs)" required:""`
@@ -54,21 +60,22 @@ func (c *ScanCmd) runSync(apiKey string) error {
 	filePath := c.Files[0]
 	fmt.Printf("Scanning %s (sync) ...\n", filePath)
 
-	result, err := ocr.SyncScan(apiKey, filePath)
+	result, err := syncScan(apiKey, filePath)
 	if err != nil {
 		return err
 	}
 
-	return output.SaveResults(c.Output, []ocr.LayoutResult{*result})
+	return saveResults(c.Output, []ocr.LayoutResult{*result})
 }
 
 func (c *ScanCmd) runAsync(apiKey string) error {
-	var allResults []ocr.LayoutResult
+	var failures []string
+	successCount := 0
 
-	for _, filePath := range c.Files {
+	for i, filePath := range c.Files {
 		fmt.Printf("Scanning %s (async) ...\n", filePath)
 
-		results, err := ocr.AsyncScan(apiKey, filePath, func(state string, extracted, total int) {
+		results, err := asyncScan(apiKey, filePath, func(state string, extracted, total int) {
 			switch state {
 			case "submitted":
 				fmt.Printf("  job submitted\n")
@@ -86,15 +93,48 @@ func (c *ScanCmd) runAsync(apiKey string) error {
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error scanning %s: %v\n", filePath, err)
+			failures = append(failures, fmt.Sprintf("%s: %v", filePath, err))
 			continue
 		}
 
-		allResults = append(allResults, results...)
+		outputDir := c.outputDirForInput(i, filePath)
+		if err := saveResults(outputDir, results); err != nil {
+			fmt.Fprintf(os.Stderr, "error saving %s: %v\n", filePath, err)
+			failures = append(failures, fmt.Sprintf("%s: %v", filePath, err))
+			continue
+		}
+
+		successCount++
 	}
 
-	if len(allResults) == 0 {
-		return fmt.Errorf("no results")
+	if successCount == 0 {
+		return fmt.Errorf("all scans failed:\n- %s", strings.Join(failures, "\n- "))
 	}
 
-	return output.SaveResults(c.Output, allResults)
+	if len(failures) > 0 {
+		return fmt.Errorf("completed with %d failure(s):\n- %s", len(failures), strings.Join(failures, "\n- "))
+	}
+
+	return nil
+}
+
+func (c *ScanCmd) outputDirForInput(index int, input string) string {
+	if len(c.Files) <= 1 {
+		return c.Output
+	}
+	return filepath.Join(c.Output, fmt.Sprintf("%02d_%s", index+1, sanitizeOutputSegment(input)))
+}
+
+func sanitizeOutputSegment(input string) string {
+	name := filepath.Base(strings.TrimSuffix(input, string(filepath.Separator)))
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		name = input
+	}
+	name = strings.TrimSpace(name)
+	name = outputSegmentPattern.ReplaceAllString(name, "-")
+	name = strings.Trim(name, ".-")
+	if name == "" {
+		return "input"
+	}
+	return name
 }

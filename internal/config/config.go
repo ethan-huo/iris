@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,24 +20,34 @@ type Config struct {
 
 type AppConfig struct {
 	Config Config
+	path   string
 }
 
-func configDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "iris")
+func configPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve config dir: %w", err)
+	}
+	return filepath.Join(dir, "iris", "config.yaml"), nil
 }
 
 func Load() (*AppConfig, error) {
-	cfgDir := configDir()
-	os.MkdirAll(cfgDir, 0755)
+	cfgPath, err := configPath()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0700); err != nil {
+		return nil, fmt.Errorf("create config dir: %w", err)
+	}
 
-	ac := &AppConfig{}
+	ac := &AppConfig{path: cfgPath}
 
-	cfgPath := filepath.Join(cfgDir, "config.yaml")
 	if data, err := os.ReadFile(cfgPath); err == nil {
 		if err := yaml.Unmarshal(data, &ac.Config); err != nil {
 			return nil, fmt.Errorf("parse config: %w", err)
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read config: %w", err)
 	}
 
 	ac.Config.Paddle.APIKey = expandEnv(ac.Config.Paddle.APIKey)
@@ -53,19 +64,19 @@ func (ac *AppConfig) RequireAPIKey() (string, error) {
 }
 
 func (ac *AppConfig) ConfigPath() string {
-	return filepath.Join(configDir(), "config.yaml")
+	return ac.path
 }
 
-func Save(cfg Config) error {
-	dir := configDir()
-	os.MkdirAll(dir, 0755)
-
-	data, err := yaml.Marshal(&cfg)
+func (ac *AppConfig) Save() error {
+	if err := os.MkdirAll(filepath.Dir(ac.path), 0700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	data, err := yaml.Marshal(&ac.Config)
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(filepath.Join(dir, "config.yaml"), data, 0600)
+	return os.WriteFile(ac.path, data, 0600)
 }
 
 func expandEnv(s string) string {
@@ -74,4 +85,24 @@ func expandEnv(s string) string {
 		return os.Getenv(name)
 	}
 	return s
+}
+
+func (c Config) IsZero() bool {
+	return c.Paddle.APIKey == ""
+}
+
+func (c Config) Redacted() Config {
+	clone := c
+	clone.Paddle.APIKey = MaskSecret(clone.Paddle.APIKey)
+	return clone
+}
+
+func MaskSecret(secret string) string {
+	if secret == "" {
+		return ""
+	}
+	if len(secret) <= 8 {
+		return strings.Repeat("*", len(secret))
+	}
+	return secret[:4] + "..." + secret[len(secret)-4:]
 }

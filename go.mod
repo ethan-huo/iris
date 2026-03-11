@@ -1,4 +1,4 @@
-module github.com/anthropics/iris
+module github.com/ethan-huo/iris
 
 go 1.24.0
 
